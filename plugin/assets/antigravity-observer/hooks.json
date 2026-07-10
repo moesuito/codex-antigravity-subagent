@@ -1,0 +1,37 @@
+{
+  "codex-antigravity-observer": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/observer-hook.mjs PreInvocation",
+        "timeout": 5
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/observer-hook.mjs PostInvocation",
+        "timeout": 5
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/observer-hook.mjs PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./scripts/observer-hook.mjs Stop",
+        "timeout": 5
+      }
+    ]
+  }
+}

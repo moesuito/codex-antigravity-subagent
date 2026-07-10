@@ -1,0 +1,6 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "codex-antigravity-observer",
+  "version": "0.1.0",
+  "description": "Passive lifecycle observer for Antigravity sessions launched by Codex."
+}

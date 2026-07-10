@@ -1,0 +1,4 @@
+interface:
+  display_name: "Antigravity Subagent"
+  short_description: "Delegate coding to a monitored agy session"
+  default_prompt: "Use $antigravity-subagent to delegate this coding task to Antigravity."
