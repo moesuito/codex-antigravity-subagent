@@ -277,6 +277,10 @@ elseif ($recovering) {
 elseif ((Get-PropertyValue $metadata 'launcherState') -eq 'failed') {
     $status = 'failed'
 }
+elseif (-not $processSample.alive -and -not $stopIsCurrent -and (Get-PropertyValue $metadata 'launcherState') -eq 'running') {
+    $status = 'failed'
+    $errorMessage = 'The broker process is no longer running and no completed Stop event was observed.'
+}
 elseif ((Get-PropertyValue $metadata 'endedAt') -and -not $processSample.alive -and -not $stopIsCurrent) {
     $status = 'failed'
     $errorMessage = 'The CLI exited before a completed Stop event was observed.'

@@ -79,6 +79,16 @@ const mode = request.mode ?? "accept-edits";
 const modelTier = request.modelTier ?? "High";
 const sessionKey = request.sessionKey || crypto.randomUUID();
 
+let workspaceStats;
+try {
+  workspaceStats = fs.statSync(workspace);
+} catch {
+  fail(`workspace does not exist: ${workspace}`);
+}
+if (!workspaceStats.isDirectory()) {
+  fail(`workspace is not a directory: ${workspace}`);
+}
+
 const stateRoot = process.env.CODEX_AGY_STATE_ROOT || path.join(os.homedir(), "AppData", "Local", "Codex", "antigravity-subagent");
 const sessionDir = path.join(stateRoot, "sessions", sessionKey);
 fs.mkdirSync(sessionDir, { recursive: true });
@@ -192,6 +202,18 @@ const child = spawn(acpBinaryPath, [], {
   shell: acpBinaryPath.endsWith(".bat") || acpBinaryPath.endsWith(".cmd") ? true : undefined,
 });
 
+// A missing executable or invalid child cwd is reported asynchronously by Node.
+// Keep the failure inside the broker's normal completion path so metadata and
+// status consumers never mistake an aborted launch for a running session.
+let childSpawnError = null;
+child.on("error", (error) => {
+  childSpawnError = error;
+  for (const pending of pendingRequests.values()) {
+    pending.reject(error);
+  }
+  pendingRequests.clear();
+});
+
 const logStream = fs.createWriteStream(path.join(sessionDir, "agy.log"), { flags: "a" });
 child.stderr.pipe(logStream);
 
@@ -204,6 +226,7 @@ const pendingRequests = new Map();
 let nextRequestId = 1;
 
 function sendRequest(method, params = {}) {
+  if (childSpawnError) return Promise.reject(childSpawnError);
   const id = nextRequestId++;
   const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
   child.stdin.write(payload);

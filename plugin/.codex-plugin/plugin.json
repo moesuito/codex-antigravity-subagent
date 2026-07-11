@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Delegate coding work to a monitored Antigravity CLI session.",
   "author": {
     "name": "Alano"
@@ -17,7 +17,7 @@
   "interface": {
     "displayName": "Antigravity Subagent",
     "shortDescription": "Delegate coding to a monitored agy session",
-    "longDescription": "Runs Antigravity CLI as a persistent PTY coding subagent, monitors lifecycle and workspace progress, and recovers stalled conversations with verified handoffs.",
+    "longDescription": "Runs Antigravity CLI through a headless ACP adapter, monitors lifecycle and workspace progress, and recovers stalled conversations with verified handoffs.",
     "developerName": "Alano",
     "category": "Productivity",
     "capabilities": [

@@ -58,7 +58,7 @@ try {
     $now = [DateTimeOffset]::UtcNow
     Write-Json (Join-Path $sessionDirectory 'metadata.json') ([ordered]@{
         schemaVersion = 1; sessionKey = $sessionKey; workspace = $temporaryRoot
-        launcherPid = 999999; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+        launcherPid = $PID; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
         autonomy = 'full-machine'; startedAt = $now.AddSeconds(-10).ToString('o')
         updatedAt = $now.AddSeconds(-10).ToString('o'); endedAt = $null
         exitCode = $null; launcherState = 'running'; logPath = (Join-Path $sessionDirectory 'agy.log')
@@ -100,7 +100,7 @@ try {
         $old = $now.AddSeconds(-1 * $case.Age)
         Write-Json (Join-Path $caseDirectory 'metadata.json') ([ordered]@{
             schemaVersion = 1; sessionKey = $caseKey; workspace = $temporaryRoot
-            launcherPid = 999998; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+            launcherPid = $PID; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
             autonomy = 'full-machine'; startedAt = $old.ToString('o'); updatedAt = $old.ToString('o')
             endedAt = $null; exitCode = $null; launcherState = 'running'; logPath = (Join-Path $caseDirectory 'missing.log')
         })
@@ -128,6 +128,22 @@ try {
     )
     $awaitStatus = & $statusScript -SessionKey $awaitKey -StateRoot $stateRoot -Now ([DateTimeOffset]::UtcNow) -NoWriteHealth | ConvertFrom-Json
     Assert-Equal $awaitStatus.status 'awaiting_input' 'auth signal has status precedence'
+
+    # A broker that disappears without recording a completed Stop must never be
+    # presented as a still-running session.
+    $deadKey = [guid]::NewGuid().ToString()
+    $deadDirectory = Join-Path $stateRoot "sessions\$deadKey"
+    Write-Json (Join-Path $deadDirectory 'metadata.json') ([ordered]@{
+        schemaVersion = 1; sessionKey = $deadKey; workspace = $temporaryRoot
+        launcherPid = 999996; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+        autonomy = 'full-machine'; startedAt = $now.ToString('o'); updatedAt = $now.ToString('o')
+        endedAt = $null; exitCode = $null; launcherState = 'running'; logPath = (Join-Path $deadDirectory 'missing.log')
+    })
+    Write-JsonLines (Join-Path $deadDirectory 'events.jsonl') @(
+        [ordered]@{ eventType = 'PreInvocation'; observedAt = $now.ToString('o'); conversationId = $null; transcriptPath = $null }
+    )
+    $deadStatus = & $statusScript -SessionKey $deadKey -StateRoot $stateRoot -Now $now -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $deadStatus.status 'failed' 'dead broker without Stop is failed'
 
     # Recovery handoff includes evidence and is round-trippable.
     $handoff = & $handoffScript `
@@ -166,6 +182,30 @@ try {
     $proc = [System.Diagnostics.Process]::Start($pInfo)
     $ready = $proc.StandardOutput.ReadLine()
     Assert-Equal $ready "CODEX_AGY_REQUEST_READY=1" "broker prints ready line"
+
+    # Validate the requested workspace before creating state or attempting a
+    # child spawn, which turns a bad path into an actionable request error.
+    $invalidWorkspaceRequest = @{
+        workspace = (Join-Path $temporaryRoot 'missing-workspace')
+        task = 'invalid workspace test'
+        mode = 'plan'
+        modelTier = 'High'
+    } | ConvertTo-Json -Compress
+    $invalidInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $invalidInfo.FileName = 'node'
+    $invalidInfo.Arguments = $brokerScript
+    $invalidInfo.RedirectStandardInput = $true
+    $invalidInfo.RedirectStandardOutput = $true
+    $invalidInfo.RedirectStandardError = $true
+    $invalidInfo.UseShellExecute = $false
+    $invalidInfo.EnvironmentVariables['CODEX_AGY_STATE_ROOT'] = $lockState
+    $invalidInfo.EnvironmentVariables['CODEX_AGY_ACP_PATH'] = $mockAcpBat
+    $invalidProc = [System.Diagnostics.Process]::Start($invalidInfo)
+    [void]$invalidProc.StandardOutput.ReadLine()
+    $invalidProc.StandardInput.WriteLine($invalidWorkspaceRequest)
+    $invalidProc.StandardInput.Flush()
+    $invalidProc.WaitForExit()
+    Assert-Equal $invalidProc.ExitCode 2 'broker rejects missing workspace before launch'
 
     $requestJson = @{
         workspace = $workspace
