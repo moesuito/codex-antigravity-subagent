@@ -43,6 +43,8 @@ Start a new Codex task after installation so the updated plugin and skill are lo
 - Runs a passive watchdog check at 5 minutes, then checks each minute after 10 minutes and wakes Codex only when ACP lifecycle activity is absent.
 - Keeps an idle worker session open while Codex reviews the diff, commit, and tests.
 - Sends review deltas directly to the same worker session; no user copy/paste bridge.
+- Persists the real ACP session ID for follow-ups and upgrades v2.1 session records from their conversation history when possible.
+- Treats quota, timeout, nonzero worker exits, and missing final responses as structured failures instead of successful completion.
 - Recovers stalls with bounded retries and evidence-backed handoffs.
 
 ## Security model

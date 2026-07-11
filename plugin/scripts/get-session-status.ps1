@@ -143,6 +143,21 @@ $transcript = @()
 if ($transcriptPath) { $transcript = @(Read-JsonLines -Path $transcriptPath) }
 $lastTranscript = if ($transcript.Count) { $transcript[-1] } else { $null }
 
+$completionResponse = Get-PropertyValue $metadata 'finalResponse'
+if ([string]::IsNullOrWhiteSpace([string]$completionResponse) -and $transcript.Count) {
+    $lastUserIndexForCompletion = -1
+    for ($index = 0; $index -lt $transcript.Count; $index++) {
+        if ((Get-PropertyValue $transcript[$index] 'type') -eq 'USER_INPUT') { $lastUserIndexForCompletion = $index }
+    }
+    for ($index = $transcript.Count - 1; $index -gt $lastUserIndexForCompletion; $index--) {
+        if ((Get-PropertyValue $transcript[$index] 'type') -eq 'PLANNER_RESPONSE') {
+            $completionResponse = Get-PropertyValue $transcript[$index] 'content'
+            break
+        }
+    }
+}
+$hasFinalResponse = -not [string]::IsNullOrWhiteSpace([string]$completionResponse)
+
 $conversationId = $null
 for ($index = $events.Count - 1; $index -ge 0; $index--) {
     $candidate = Get-PropertyValue $events[$index] 'conversationId'
@@ -250,8 +265,13 @@ if ($stopIsCurrent -and $lastTurnSubmitted) {
 }
 $currentStop = if ($stopIsCurrent) { $events[$lastStopIndex] } else { $null }
 $fullyIdle = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'fullyIdle' } else { $null }
-$terminationReason = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'terminationReason' } else { $null }
-$errorMessage = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'error' } else { $null }
+$terminationReason = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'terminationReason' } else { Get-PropertyValue $metadata 'terminationReason' }
+$errorMessage = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'error' } else { Get-PropertyValue $metadata 'error' }
+$errorCode = if ($stopIsCurrent) { Get-PropertyValue $currentStop 'errorCode' } else { Get-PropertyValue $metadata 'errorCode' }
+$recoveryHint = Get-PropertyValue $metadata 'recoveryHint'
+$brokerExitCode = Get-PropertyValue $metadata 'brokerExitCode'
+if ($null -eq $brokerExitCode) { $brokerExitCode = Get-PropertyValue $metadata 'exitCode' }
+$workerExitCode = Get-PropertyValue $metadata 'workerExitCode'
 
 $awaitingKinds = @('auth_required', 'trust_required', 'awaiting_input')
 $lastSignalAt = Convert-ToDate (Get-PropertyValue $lastSignal 'observedAt')
@@ -262,10 +282,22 @@ $awaitingInput = $signalIsCurrent -and ($awaitingKinds -contains [string](Get-Pr
 $recovering = $signalIsCurrent -and (@('recovery_started', 'recovery_prompt_sent', 'new_conversation') -contains [string](Get-PropertyValue $lastSignal 'kind'))
 
 $status = 'starting'
-if ($stopIsCurrent -and ($errorMessage -or $terminationReason -in @('error', 'max_steps_exceeded'))) {
+$knownFailureReasons = @(
+    'error', 'max_steps_exceeded', 'quota_exceeded', 'response_timeout',
+    'worker_process_failed', 'missing_final_response', 'session_not_resumable', 'execution_error'
+)
+$brokerFailed = $null -ne $brokerExitCode -and [int]$brokerExitCode -ne 0
+if ((Get-PropertyValue $metadata 'launcherState') -eq 'failed' -or $brokerFailed -or $errorMessage -or $terminationReason -in $knownFailureReasons) {
     $status = 'failed'
 }
-elseif ($stopIsCurrent -and $fullyIdle -eq $true) {
+elseif ($stopIsCurrent -and $fullyIdle -eq $true -and -not $hasFinalResponse) {
+    $status = 'failed'
+    $terminationReason = 'missing_final_response'
+    $errorCode = 'missing_final_response'
+    $errorMessage = 'Antigravity ended the turn without a final response.'
+    $recoveryHint = 'resume_or_start_fresh'
+}
+elseif ($stopIsCurrent -and $fullyIdle -eq $true -and $hasFinalResponse) {
     $status = 'completed'
 }
 elseif ($awaitingInput) {
@@ -273,9 +305,6 @@ elseif ($awaitingInput) {
 }
 elseif ($recovering) {
     $status = 'recovering'
-}
-elseif ((Get-PropertyValue $metadata 'launcherState') -eq 'failed') {
-    $status = 'failed'
 }
 elseif (-not $processSample.alive -and -not $stopIsCurrent -and (Get-PropertyValue $metadata 'launcherState') -eq 'running') {
     $status = 'failed'
@@ -332,24 +361,7 @@ for ($index = $transcript.Count - 1; $index -ge 0 -and -not $lastTool; $index--)
 }
 if (-not $lastTool -and $transcriptType) { $lastTool = $transcriptType }
 
-$finalResponse = $null
-if ($IncludeContent -and $transcript.Count) {
-    $lastUserIndex = -1
-    for ($index = 0; $index -lt $transcript.Count; $index++) {
-        if ((Get-PropertyValue $transcript[$index] 'type') -eq 'USER_INPUT') { $lastUserIndex = $index }
-    }
-    for ($index = $transcript.Count - 1; $index -gt $lastUserIndex; $index--) {
-        if ((Get-PropertyValue $transcript[$index] 'type') -eq 'PLANNER_RESPONSE') {
-            $candidate = Get-PropertyValue $transcript[$index] 'content'
-            if ($candidate -is [string]) { $finalResponse = $candidate }
-            elseif ($null -ne $candidate) { $finalResponse = $candidate | ConvertTo-Json -Depth 8 -Compress }
-            break
-        }
-    }
-}
-if ($IncludeContent -and -not $finalResponse) {
-    $finalResponse = Get-PropertyValue $metadata 'finalResponse'
-}
+$finalResponse = if ($IncludeContent -and $hasFinalResponse) { $completionResponse } else { $null }
 
 $evidence = [System.Collections.Generic.List[string]]::new()
 if ($lastEventType) { $evidence.Add("hook:$lastEventType") }
@@ -378,7 +390,12 @@ $evidence.Add("inactiveSeconds:$inactiveSeconds")
     processCount       = $processSample.processCount
     fullyIdle          = $fullyIdle
     terminationReason  = $terminationReason
+    brokerExitCode     = $brokerExitCode
+    workerExitCode     = $workerExitCode
+    hasFinalResponse   = $hasFinalResponse
+    errorCode          = $errorCode
     error              = $errorMessage
+    recoveryHint       = $recoveryHint
     transcriptPath     = $transcriptPath
     eventCount         = $events.Count
     transcriptStepCount = $transcript.Count

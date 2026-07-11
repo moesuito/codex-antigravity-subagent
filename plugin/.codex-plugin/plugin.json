@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Delegate coding work to a monitored Antigravity CLI session.",
   "author": {
     "name": "Alano"

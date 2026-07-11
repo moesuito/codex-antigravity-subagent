@@ -67,12 +67,14 @@ The JSON contract contains:
 - `health`: `ok`, `suspected_stall`, or `stalled`
 - workspace, model, mode, session key, conversation ID
 - process liveness, `fullyIdle`, error, and evidence
+- `brokerExitCode`, `workerExitCode`, `hasFinalResponse`, `errorCode`, and `recoveryHint`
 
 State precedence:
 
-1. Process failure or execution error -> `failed`
-2. Stop event with `fullyIdle: true` -> `completed`
-3. Running broker process -> `running`
+1. Nonzero broker/worker exit, structured execution error, quota, or timeout -> `failed`
+2. Stop with `fullyIdle: true`, exit 0, and a non-empty final response -> `completed`
+3. Stop with `fullyIdle: true` and an empty final response -> `failed` with `missing_final_response`
+4. Running broker process -> `running`
 
 The broker automatically appends events to `events.jsonl` matching the old observer schema, allowing `get-session-status.ps1` to parse status seamlessly.
 
@@ -81,9 +83,12 @@ The broker automatically appends events to `events.jsonl` matching the old obser
 1. Submit the request with `outputMode: "silent"`, then leave that same terminal waiting. Do not poll terminal output or invoke the status helper during normal execution.
 2. The broker stores worker chunks and tool events locally but does not relay them to Codex. This prevents progress chatter from consuming Codex context.
 3. On the final ACP response, the broker persists `finalResponse`, emits `Stop`, and writes one `CODEX_AGY_TURN_FINISHED` line. That line is the completion wake-up signal.
+   Its payload is authoritative and includes `status`, `terminationReason`, `hasFinalResponse`, and failure recovery fields when applicable.
 4. The broker records a passive watchdog checkpoint at 5 minutes. It remains silent at that point.
 5. After 10 minutes, it checks once per minute. A `CODEX_AGY_WATCHDOG_REVIEW` line is emitted only if no ACP lifecycle activity occurred for the preceding escalation interval. On that event, query `get-session-status.ps1` once and inspect minimal evidence; resume standby unless recovery is justified.
 6. When `CODEX_AGY_TURN_FINISHED` arrives, query `get-session-status.ps1 -IncludeContent` exactly once, then review the diff and tests.
+
+For follow-ups, the local `sessionKey` resolves to the persisted ACP session ID. Sessions created by v2.1.0 are upgraded by matching their last conversation ID, including event history, against the adapter store. If no safe mapping exists, the broker returns `session_not_resumable` with `start_fresh_conversation`; it must not expose an opaque `unknown sessionId` as the public result.
 
 The status helper marks:
 

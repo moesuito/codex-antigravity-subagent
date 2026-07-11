@@ -203,12 +203,12 @@ impl Adapter {
 fn decide_turn_error(
     was_cancelled: bool,
     status_success: bool,
-    had_updates: bool,
+    _had_updates: bool,
     status_display: &str,
     stderr_text: &str,
     swallowed_error: Option<&str>,
 ) -> Option<(i32, String)> {
-    if was_cancelled || had_updates {
+    if was_cancelled {
         return None;
     }
     if !status_success {
@@ -1029,8 +1029,10 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
     }
 
     #[test]
-    fn test_decide_turn_error_had_updates_never_surfaces() {
-        assert_eq!(decide_turn_error(false, false, true, "exit 1", "boom", Some("swallowed")), None);
+    fn test_decide_turn_error_nonzero_exit_surfaces_even_after_partial_updates() {
+        let (code, msg) = decide_turn_error(false, false, true, "exit 1", "boom", Some("swallowed")).unwrap();
+        assert_eq!(code, -32000);
+        assert!(msg.contains("boom"));
     }
 
     #[test]

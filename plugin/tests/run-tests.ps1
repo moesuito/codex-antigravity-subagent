@@ -145,6 +145,25 @@ try {
     $deadStatus = & $statusScript -SessionKey $deadKey -StateRoot $stateRoot -Now $now -NoWriteHealth | ConvertFrom-Json
     Assert-Equal $deadStatus.status 'failed' 'dead broker without Stop is failed'
 
+    # Legacy v2.1 sessions could record a successful Stop with exit 0 while the
+    # final response was empty. Public status must reject that false completion.
+    $emptyKey = [guid]::NewGuid().ToString()
+    $emptyDirectory = Join-Path $stateRoot "sessions\$emptyKey"
+    Write-Json (Join-Path $emptyDirectory 'metadata.json') ([ordered]@{
+        schemaVersion = 1; sessionKey = $emptyKey; workspace = $temporaryRoot
+        launcherPid = 999995; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+        autonomy = 'full-machine'; startedAt = $now.ToString('o'); updatedAt = $now.ToString('o')
+        endedAt = $now.ToString('o'); exitCode = 0; brokerExitCode = 0
+        launcherState = 'exited'; finalResponse = ''
+    })
+    Write-JsonLines (Join-Path $emptyDirectory 'events.jsonl') @(
+        [ordered]@{ eventType = 'PreInvocation'; observedAt = $now.AddSeconds(-1).ToString('o'); conversationId = $null },
+        [ordered]@{ eventType = 'Stop'; observedAt = $now.ToString('o'); conversationId = $null; fullyIdle = $true; terminationReason = 'model_stop' }
+    )
+    $emptyStatus = & $statusScript -SessionKey $emptyKey -StateRoot $stateRoot -Now $now -IncludeContent -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $emptyStatus.status 'failed' 'empty final response is never completed'
+    Assert-Equal $emptyStatus.errorCode 'missing_final_response' 'empty legacy response has explicit error code'
+
     # Recovery handoff includes evidence and is round-trippable.
     $handoff = & $handoffScript `
         -WorkspaceBase64 (Encode $temporaryRoot) `
@@ -166,8 +185,57 @@ try {
     New-Item -ItemType Directory -Path $workspace -Force | Out-Null
     
     $mockAcpBat = Join-Path $temporaryRoot 'mock-acp.bat'
-    $mockContent = '@echo off' + [Environment]::NewLine + 'node -e "const rl = require(''readline'').createInterface({input: process.stdin}); rl.on(''line'', l => { try { const msg = JSON.parse(l); let result = {}; if (msg.method === ''initialize'') { result = {protocolVersion:1}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/new'') { result = {sessionId:''test-session''}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/setConfigOption'') { result = {}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/prompt'') { console.log(JSON.stringify({jsonrpc:''2.0'',method:''session/update'',params:{update:{sessionUpdate:''agent_message_chunk'',content:{type:''text'',text:''PONG''}}}})); setTimeout(() => { console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}})); }, 3000); } } catch(e) {} });"'
+    $mockContent = '@echo off' + [Environment]::NewLine + 'node -e "const rl = require(''readline'').createInterface({input: process.stdin}); const reply=(m)=>console.log(JSON.stringify(m)); const chunk=(t)=>reply({jsonrpc:''2.0'',method:''session/update'',params:{update:{sessionUpdate:''agent_message_chunk'',content:{type:''text'',text:t}}}}); rl.on(''line'', l => { try { const msg=JSON.parse(l); if(msg.method===''initialize''){reply({jsonrpc:''2.0'',id:msg.id,result:{protocolVersion:1}});} else if(msg.method===''session/new''){reply({jsonrpc:''2.0'',id:msg.id,result:{sessionId:''test-session''}});} else if(msg.method===''session/load''){if([''test-session'',''legacy-acp-session''].includes(msg.params.sessionId)){reply({jsonrpc:''2.0'',id:msg.id,result:{sessionId:msg.params.sessionId}});}else{reply({jsonrpc:''2.0'',id:msg.id,error:{code:-32000,message:''unknown sessionId: ''+msg.params.sessionId}});}} else if(msg.method===''session/setConfigOption''){reply({jsonrpc:''2.0'',id:msg.id,result:{}});} else if(msg.method===''session/prompt''){const task=msg.params.prompt.map(p=>p.text||'''').join('' ''); if(/quota/i.test(task)){reply({jsonrpc:''2.0'',id:msg.id,error:{code:-32000,message:''agy failed: Error: Individual quota reached. Resets in 1h.''}});} else if(/timeout/i.test(task)){reply({jsonrpc:''2.0'',id:msg.id,error:{code:-32000,message:''agy failed: Error: timeout waiting for response''}});} else if(/exit one/i.test(task)){reply({jsonrpc:''2.0'',id:msg.id,error:{code:-32000,message:''agy exited with status: exit code: 1''}});} else if(/missing response/i.test(task)){reply({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}});} else if(/active watchdog/i.test(task)){chunk(''A''); const timer=setInterval(()=>chunk(''A''),400); setTimeout(()=>{clearInterval(timer); reply({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}});},3000);} else {chunk(''PONG''); setTimeout(()=>reply({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}}), /lock test/i.test(task)?3000:50);}} } catch(e){} });"'
     Set-Content -LiteralPath $mockAcpBat -Value $mockContent
+    $mockAcpStore = Join-Path $temporaryRoot 'mock-acp-sessions.json'
+    Write-Json $mockAcpStore ([ordered]@{
+        sessions = [ordered]@{
+            'legacy-acp-session' = [ordered]@{ conversation_id = 'legacy-conversation'; last_step_idx = 12; model_id = $null }
+        }
+    })
+
+    function Invoke-MockBrokerTurn {
+        param(
+            [Parameter(Mandatory = $true)][string]$Task,
+            [string]$ExistingSessionKey,
+            [switch]$FastWatchdog
+        )
+        $info = [System.Diagnostics.ProcessStartInfo]::new()
+        $info.FileName = 'node'
+        $info.Arguments = $brokerScript
+        $info.RedirectStandardInput = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.UseShellExecute = $false
+        $info.EnvironmentVariables['CODEX_AGY_STATE_ROOT'] = $lockState
+        $info.EnvironmentVariables['CODEX_AGY_ACP_PATH'] = $mockAcpBat
+        $info.EnvironmentVariables['CODEX_AGY_ACP_STORE_PATH'] = $mockAcpStore
+        $process = [System.Diagnostics.Process]::Start($info)
+        $readyLine = $process.StandardOutput.ReadLine()
+        $request = [ordered]@{
+            workspace = $workspace; task = $Task; mode = 'plan'; modelTier = 'High'; outputMode = 'silent'
+        }
+        if ($ExistingSessionKey) { $request.sessionKey = $ExistingSessionKey }
+        if ($FastWatchdog) {
+            $request.watchdog = @{ passiveCheckSeconds = 1; escalationAfterSeconds = 1; escalationIntervalSeconds = 1 }
+        }
+        $process.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 8))
+        $process.StandardInput.Flush()
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $keyMatch = [regex]::Match($stdout, 'CODEX_AGY_SESSION_KEY=([0-9a-f-]{36})')
+        $turnKey = if ($keyMatch.Success) { $keyMatch.Groups[1].Value } else { $ExistingSessionKey }
+        $signalMatch = [regex]::Match($stdout, 'CODEX_AGY_TURN_FINISHED=(\{[^\r\n]+\})')
+        $signal = if ($signalMatch.Success) { $signalMatch.Groups[1].Value | ConvertFrom-Json } else { $null }
+        $turnMetadata = if ($turnKey) {
+            Get-Content -Raw (Join-Path $lockState "sessions\$turnKey\metadata.json") | ConvertFrom-Json
+        } else { $null }
+        return [pscustomobject]@{
+            Ready = $readyLine; ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr
+            SessionKey = $turnKey; Signal = $signal; Metadata = $turnMetadata
+        }
+    }
 
     $pInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $pInfo.FileName = "node"
@@ -258,6 +326,69 @@ try {
     Start-Sleep -Milliseconds 200
     $remainingLocks = @(Get-ChildItem -LiteralPath (Join-Path $lockState 'locks') -Filter '*.lock' -File -ErrorAction SilentlyContinue)
     Assert-Equal $remainingLocks.Count 0 'launcher releases workspace lock on exit'
+
+    # A local sessionKey must map back to the ACP sessionId returned by
+    # session/new so a new broker process can load the same worker context.
+    $resumeTurn = Invoke-MockBrokerTurn -Task 'follow-up correction' -ExistingSessionKey $launchedSession
+    Assert-Equal $resumeTurn.ExitCode 0 'follow-up resumes with the same sessionKey'
+    Assert-Equal $resumeTurn.Metadata.acpSessionId 'test-session' 'broker persists real ACP sessionId'
+    Assert-Equal $resumeTurn.Signal.status 'completed' 'resumed turn completes normally'
+
+    # Sessions created by v2.1.0 did not store acpSessionId. Recover those by
+    # matching the last persisted conversationId (including event history) to
+    # the adapter's durable session store.
+    $legacyKey = [guid]::NewGuid().ToString()
+    Write-Json (Join-Path $lockState "sessions\$legacyKey\metadata.json") ([ordered]@{
+        schemaVersion = 1; sessionKey = $legacyKey; workspace = $workspace
+        conversationId = $null; startedAt = [DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('o')
+    })
+    Write-JsonLines (Join-Path $lockState "sessions\$legacyKey\events.jsonl") @(
+        [ordered]@{ eventType = 'Stop'; observedAt = [DateTimeOffset]::UtcNow.AddSeconds(-30).ToString('o'); conversationId = 'legacy-conversation'; fullyIdle = $true; terminationReason = 'model_stop' }
+    )
+    $legacyResume = Invoke-MockBrokerTurn -Task 'legacy follow-up correction' -ExistingSessionKey $legacyKey
+    Assert-Equal $legacyResume.ExitCode 0 'v2.1 session resumes from conversation history'
+    Assert-Equal $legacyResume.Metadata.acpSessionId 'legacy-acp-session' 'legacy session is upgraded with ACP sessionId'
+
+    # Failure classifications must survive all the way through the terminal
+    # signal, metadata, and public status helper.
+    $quotaTurn = Invoke-MockBrokerTurn -Task 'simulate quota failure'
+    Assert-Equal $quotaTurn.ExitCode 1 'quota exits broker nonzero'
+    Assert-Equal $quotaTurn.Signal.status 'failed' 'quota completion signal is failed'
+    Assert-Equal $quotaTurn.Signal.terminationReason 'quota_exceeded' 'quota has specific termination reason'
+    Assert-Equal $quotaTurn.Metadata.errorCode 'quota_exceeded' 'quota metadata is structured'
+    Assert-True ($null -eq $quotaTurn.Metadata.finalResponse) 'quota has no final response'
+    $quotaStatus = & $statusScript -SessionKey $quotaTurn.SessionKey -StateRoot $lockState -IncludeContent | ConvertFrom-Json
+    Assert-Equal $quotaStatus.status 'failed' 'quota public status is failed'
+    Assert-Equal $quotaStatus.recoveryHint 'wait_for_quota_reset' 'quota recovery hint is actionable'
+
+    $timeoutTurn = Invoke-MockBrokerTurn -Task 'simulate timeout failure'
+    Assert-Equal $timeoutTurn.Signal.status 'failed' 'timeout completion signal is failed'
+    Assert-Equal $timeoutTurn.Metadata.terminationReason 'response_timeout' 'timeout has specific termination reason'
+    Assert-Equal $timeoutTurn.Metadata.brokerExitCode 1 'timeout records broker exit code'
+
+    $exitTurn = Invoke-MockBrokerTurn -Task 'simulate exit one failure'
+    Assert-Equal $exitTurn.Signal.status 'failed' 'worker exit one completion signal is failed'
+    Assert-Equal $exitTurn.Metadata.errorCode 'worker_process_failed' 'worker exit one is classified'
+    Assert-Equal $exitTurn.Metadata.workerExitCode 1 'worker exit code is recorded'
+
+    $missingTurn = Invoke-MockBrokerTurn -Task 'simulate missing response'
+    Assert-Equal $missingTurn.Signal.status 'failed' 'missing final response signal is failed'
+    Assert-Equal $missingTurn.Metadata.errorCode 'missing_final_response' 'missing response is classified'
+    Assert-True (-not $missingTurn.Signal.hasFinalResponse) 'missing response signal reports no final response'
+
+    $expiredKey = [guid]::NewGuid().ToString()
+    Write-Json (Join-Path $lockState "sessions\$expiredKey\metadata.json") ([ordered]@{
+        schemaVersion = 1; sessionKey = $expiredKey; workspace = $workspace
+        acpSessionId = 'expired-acp-session'; startedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    })
+    $expiredTurn = Invoke-MockBrokerTurn -Task 'follow-up on expired session' -ExistingSessionKey $expiredKey
+    Assert-Equal $expiredTurn.Signal.status 'failed' 'expired session signal is failed'
+    Assert-Equal $expiredTurn.Metadata.errorCode 'session_not_resumable' 'expired session has explicit error code'
+    Assert-Equal $expiredTurn.Metadata.recoveryHint 'start_fresh_conversation' 'expired session has recovery hint'
+
+    $activeWatchdogTurn = Invoke-MockBrokerTurn -Task 'active watchdog test' -FastWatchdog
+    Assert-Equal $activeWatchdogTurn.Signal.status 'completed' 'active watchdog turn completes'
+    Assert-True (-not ($activeWatchdogTurn.Stdout -match 'CODEX_AGY_WATCHDOG_REVIEW')) 'watchdog does not alert while ACP activity continues'
 }
 finally {
     if ($temporaryRoot.StartsWith([IO.Path]::GetFullPath($env:TEMP), [StringComparison]::OrdinalIgnoreCase)) {
