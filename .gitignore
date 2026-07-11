@@ -1,0 +1,5 @@
+release/
+*.zip
+*.tmp
+__pycache__/
+plugin/bin/

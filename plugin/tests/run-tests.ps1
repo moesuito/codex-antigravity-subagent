@@ -1,0 +1,220 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:Passed = 0
+$script:Failed = 0
+
+function Assert-Equal($Actual, $Expected, [string]$Name) {
+    if ($Actual -ceq $Expected) {
+        $script:Passed++
+        Write-Output "PASS $Name"
+    }
+    else {
+        $script:Failed++
+        Write-Output "FAIL $Name expected=[$Expected] actual=[$Actual]"
+    }
+}
+
+function Assert-True([bool]$Condition, [string]$Name) {
+    Assert-Equal $Condition $true $Name
+}
+
+function Encode([string]$Value) {
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+}
+
+function Write-Json([string]$Path, $Value) {
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    Set-Content -LiteralPath $Path -Value ($Value | ConvertTo-Json -Depth 12) -Encoding utf8NoBOM
+}
+
+function Write-JsonLines([string]$Path, [object[]]$Values) {
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $lines = $Values | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 12 }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding utf8NoBOM
+}
+
+$pluginRoot = Split-Path -Parent $PSScriptRoot
+$scripts = Join-Path $pluginRoot 'scripts'
+$statusScript = Join-Path $scripts 'get-session-status.ps1'
+$handoffScript = Join-Path $scripts 'build-recovery-handoff.ps1'
+$brokerScript = Join-Path $scripts 'start-agy-session.mjs'
+$temporaryRoot = Join-Path $env:TEMP "antigravity-subagent-tests-$([guid]::NewGuid().ToString('N'))"
+$temporaryRoot = [IO.Path]::GetFullPath($temporaryRoot)
+New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
+
+try {
+    $sessionKey = [guid]::NewGuid().ToString()
+    $stateRoot = Join-Path $temporaryRoot 'state'
+    $sessionDirectory = Join-Path $stateRoot "sessions\$sessionKey"
+    New-Item -ItemType Directory -Path $sessionDirectory -Force | Out-Null
+    $transcriptPath = Join-Path $temporaryRoot 'brain\conversation\.system_generated\logs\transcript.jsonl'
+
+    # Completed status with final response.
+    $now = [DateTimeOffset]::UtcNow
+    Write-Json (Join-Path $sessionDirectory 'metadata.json') ([ordered]@{
+        schemaVersion = 1; sessionKey = $sessionKey; workspace = $temporaryRoot
+        launcherPid = 999999; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+        autonomy = 'full-machine'; startedAt = $now.AddSeconds(-10).ToString('o')
+        updatedAt = $now.AddSeconds(-10).ToString('o'); endedAt = $null
+        exitCode = $null; launcherState = 'running'; logPath = (Join-Path $sessionDirectory 'agy.log')
+    })
+    Write-JsonLines $transcriptPath @(
+        [ordered]@{ step_index = 0; type = 'USER_INPUT'; status = 'DONE'; created_at = $now.AddSeconds(-8).ToString('o'); content = 'hidden' },
+        [ordered]@{ step_index = 1; type = 'PLANNER_RESPONSE'; status = 'DONE'; created_at = $now.AddSeconds(-4).ToString('o'); content = 'OK' }
+    )
+    Write-JsonLines (Join-Path $sessionDirectory 'events.jsonl') @(
+        [ordered]@{ eventType = 'PreInvocation'; observedAt = $now.AddSeconds(-10).ToString('o'); conversationId = $null; transcriptPath = $transcriptPath },
+        [ordered]@{ eventType = 'Stop'; observedAt = $now.AddSeconds(-2).ToString('o'); conversationId = $null; fullyIdle = $true; terminationReason = 'model_stop' }
+    )
+    $status = & $statusScript -SessionKey $sessionKey -StateRoot $stateRoot -Now $now -IncludeContent -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $status.status 'completed' 'completed status requires Stop fullyIdle'
+    Assert-True ($status.evidence -contains 'hook:Stop') 'Stop remains current after trailing PostToolUse'
+    Assert-Equal $status.phase 'idle' 'completed phase is idle'
+    Assert-Equal $status.finalResponse 'OK' 'final response follows latest user input'
+
+    # A follow-up instruction must reopen the same live session before
+    # Antigravity has emitted its next PreInvocation hook.
+    Write-JsonLines (Join-Path $sessionDirectory 'signals.jsonl') @(
+        [ordered]@{
+            schemaVersion = 1; sessionKey = $sessionKey; kind = 'turn_submitted'
+            observedAt = $now.AddSeconds(1).ToString('o'); conversationId = $null
+            note = 'Codex review delta submitted'
+        }
+    )
+    $followUpStatus = & $statusScript -SessionKey $sessionKey -StateRoot $stateRoot -Now $now.AddSeconds(2) -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $followUpStatus.status 'running' 'turn_submitted reopens completed turn'
+    Assert-Equal $followUpStatus.phase 'thinking' 'turn_submitted phase is thinking'
+
+    # Deterministic suspected/stalled classifications.
+    foreach ($case in @(
+        @{ Age = 360; Expected = 'suspected_stall' },
+        @{ Age = 1200; Expected = 'stalled' }
+    )) {
+        $caseKey = [guid]::NewGuid().ToString()
+        $caseDirectory = Join-Path $stateRoot "sessions\$caseKey"
+        $old = $now.AddSeconds(-1 * $case.Age)
+        Write-Json (Join-Path $caseDirectory 'metadata.json') ([ordered]@{
+            schemaVersion = 1; sessionKey = $caseKey; workspace = $temporaryRoot
+            launcherPid = 999998; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+            autonomy = 'full-machine'; startedAt = $old.ToString('o'); updatedAt = $old.ToString('o')
+            endedAt = $null; exitCode = $null; launcherState = 'running'; logPath = (Join-Path $caseDirectory 'missing.log')
+        })
+        Write-JsonLines (Join-Path $caseDirectory 'events.jsonl') @(
+            [ordered]@{ eventType = 'PreInvocation'; observedAt = $old.ToString('o'); conversationId = $null; transcriptPath = $null }
+        )
+        $caseStatus = & $statusScript -SessionKey $caseKey -StateRoot $stateRoot -Now $now -NoWriteHealth | ConvertFrom-Json
+        Assert-Equal $caseStatus.health $case.Expected "health $($case.Expected)"
+    }
+
+    # Awaiting-input signal precedence.
+    $awaitKey = [guid]::NewGuid().ToString()
+    $awaitDirectory = Join-Path $stateRoot "sessions\$awaitKey"
+    Write-Json (Join-Path $awaitDirectory 'metadata.json') ([ordered]@{
+        schemaVersion = 1; sessionKey = $awaitKey; workspace = $temporaryRoot
+        launcherPid = 999997; model = 'Gemini 3.5 Flash (High)'; mode = 'accept-edits'
+        autonomy = 'full-machine'; startedAt = $now.ToString('o'); updatedAt = $now.ToString('o')
+        endedAt = $null; exitCode = $null; launcherState = 'running'; logPath = (Join-Path $awaitDirectory 'missing.log')
+    })
+    Write-JsonLines (Join-Path $awaitDirectory 'signals.jsonl') @(
+        [ordered]@{
+            schemaVersion = 1; sessionKey = $awaitKey; kind = 'auth_required'
+            observedAt = $now.ToString('o'); conversationId = $null
+        }
+    )
+    $awaitStatus = & $statusScript -SessionKey $awaitKey -StateRoot $stateRoot -Now ([DateTimeOffset]::UtcNow) -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $awaitStatus.status 'awaiting_input' 'auth signal has status precedence'
+
+    # Recovery handoff includes evidence and is round-trippable.
+    $handoff = & $handoffScript `
+        -WorkspaceBase64 (Encode $temporaryRoot) `
+        -OriginalTaskBase64 (Encode 'Implement feature X') `
+        -FailureReasonBase64 (Encode 'The prior agent contradicted the filesystem') `
+        -AcceptanceCriteriaBase64 (Encode 'Tests pass') `
+        -VerifiedWorkBase64 (Encode 'File A exists') `
+        -RemainingWorkBase64 (Encode 'Finish file B') `
+        -TestResultsBase64 (Encode 'Test Y failed') `
+        -SessionKeysBase64 (Encode (@($sessionKey) | ConvertTo-Json -Compress)) `
+        -StateRoot $stateRoot | ConvertFrom-Json
+    Assert-True $handoff.prompt.Contains('Implement feature X') 'handoff contains original goal'
+    Assert-True ($handoff.prompt -match '(?i)inspect the filesystem') 'handoff distrusts prior claims'
+    Assert-Equal ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($handoff.promptBase64))) $handoff.prompt 'handoff Base64 round trip'
+
+    # Exclusive workspace lock and cleanup after process exit.
+    $lockState = Join-Path $temporaryRoot 'lock-state'
+    $workspace = Join-Path $temporaryRoot 'workspace'
+    New-Item -ItemType Directory -Path $workspace -Force | Out-Null
+    
+    $mockAcpBat = Join-Path $temporaryRoot 'mock-acp.bat'
+    $mockContent = '@echo off' + [Environment]::NewLine + 'node -e "const rl = require(''readline'').createInterface({input: process.stdin}); rl.on(''line'', l => { try { const msg = JSON.parse(l); let result = {}; if (msg.method === ''initialize'') { result = {protocolVersion:1}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/new'') { result = {sessionId:''test-session''}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/setConfigOption'') { result = {}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/prompt'') { console.log(JSON.stringify({jsonrpc:''2.0'',method:''session/update'',params:{update:{sessionUpdate:''agent_message_chunk'',content:{type:''text'',text:''PONG''}}}})); setTimeout(() => { console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}})); }, 2000); } } catch(e) {} });"'
+    Set-Content -LiteralPath $mockAcpBat -Value $mockContent
+
+    $pInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $pInfo.FileName = "node"
+    $pInfo.Arguments = $brokerScript
+    $pInfo.RedirectStandardInput = $true
+    $pInfo.RedirectStandardOutput = $true
+    $pInfo.RedirectStandardError = $true
+    $pInfo.UseShellExecute = $false
+    $pInfo.EnvironmentVariables["CODEX_AGY_STATE_ROOT"] = $lockState
+    $pInfo.EnvironmentVariables["CODEX_AGY_ACP_PATH"] = $mockAcpBat
+
+    $proc = [System.Diagnostics.Process]::Start($pInfo)
+    $ready = $proc.StandardOutput.ReadLine()
+    Assert-Equal $ready "CODEX_AGY_REQUEST_READY=1" "broker prints ready line"
+
+    $requestJson = @{
+        workspace = $workspace
+        task = "lock test"
+        mode = "plan"
+        modelTier = "High"
+    } | ConvertTo-Json -Compress
+
+    $proc.StandardInput.WriteLine($requestJson)
+    $proc.StandardInput.Flush()
+
+    $lockFound = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        if (Get-ChildItem -LiteralPath (Join-Path $lockState 'locks') -Filter '*.lock' -File -ErrorAction SilentlyContinue) {
+            $lockFound = $true; break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True $lockFound 'first launcher holds workspace lock'
+
+    $pInfo2 = [System.Diagnostics.ProcessStartInfo]::new()
+    $pInfo2.FileName = "node"
+    $pInfo2.Arguments = $brokerScript
+    $pInfo2.RedirectStandardInput = $true
+    $pInfo2.RedirectStandardOutput = $true
+    $pInfo2.RedirectStandardError = $true
+    $pInfo2.UseShellExecute = $false
+    $pInfo2.EnvironmentVariables["CODEX_AGY_STATE_ROOT"] = $lockState
+    $pInfo2.EnvironmentVariables["CODEX_AGY_ACP_PATH"] = $mockAcpBat
+
+    $proc2 = [System.Diagnostics.Process]::Start($pInfo2)
+    $ready2 = $proc2.StandardOutput.ReadLine()
+    $proc2.StandardInput.WriteLine($requestJson)
+    $proc2.StandardInput.Flush()
+    $proc2.WaitForExit()
+    Assert-Equal $proc2.ExitCode 73 'second launcher is rejected for same workspace'
+
+    $proc.WaitForExit(10000) | Out-Null
+    if (-not $proc.HasExited) { $proc.Kill() }
+    
+    Start-Sleep -Milliseconds 200
+    $remainingLocks = @(Get-ChildItem -LiteralPath (Join-Path $lockState 'locks') -Filter '*.lock' -File -ErrorAction SilentlyContinue)
+    Assert-Equal $remainingLocks.Count 0 'launcher releases workspace lock on exit'
+}
+finally {
+    if ($temporaryRoot.StartsWith([IO.Path]::GetFullPath($env:TEMP), [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Output "RESULT passed=$script:Passed failed=$script:Failed"
+if ($script:Failed -gt 0) { exit 1 }

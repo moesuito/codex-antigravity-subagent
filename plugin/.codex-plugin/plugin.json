@@ -1,0 +1,35 @@
+{
+  "name": "antigravity-subagent",
+  "version": "1.0.0",
+  "description": "Delegate coding work to a monitored Antigravity CLI session.",
+  "author": {
+    "name": "Alano"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "antigravity",
+    "agy",
+    "coding-agent",
+    "subagent",
+    "windows"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Antigravity Subagent",
+    "shortDescription": "Delegate coding to a monitored agy session",
+    "longDescription": "Runs Antigravity CLI as a persistent PTY coding subagent, monitors lifecycle and workspace progress, and recovers stalled conversations with verified handoffs.",
+    "developerName": "Alano",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Delegate this coding task to Antigravity",
+      "Monitor the active Antigravity session",
+      "Recover the stalled Antigravity task"
+    ],
+    "brandColor": "#7C3AED"
+  }
+}
