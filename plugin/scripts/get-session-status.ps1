@@ -273,6 +273,23 @@ $brokerExitCode = Get-PropertyValue $metadata 'brokerExitCode'
 if ($null -eq $brokerExitCode) { $brokerExitCode = Get-PropertyValue $metadata 'exitCode' }
 $workerExitCode = Get-PropertyValue $metadata 'workerExitCode'
 
+# Upgrade unstructured v2.1 failures on read so old session records expose the
+# same actionable contract as sessions written by the fixed broker.
+if (-not $errorCode -and $errorMessage) {
+    if ([string]$errorMessage -match '(?i)individual quota|quota.*reached|resource_exhausted|429') {
+        $errorCode = 'quota_exceeded'; $terminationReason = 'quota_exceeded'; $recoveryHint = 'wait_for_quota_reset'
+    }
+    elseif ([string]$errorMessage -match '(?i)timeout|timed out|deadline exceeded') {
+        $errorCode = 'response_timeout'; $terminationReason = 'response_timeout'; $recoveryHint = 'resume_or_start_fresh'
+    }
+    elseif ([string]$errorMessage -match '(?i)unknown sessionid') {
+        $errorCode = 'session_not_resumable'; $terminationReason = 'session_not_resumable'; $recoveryHint = 'start_fresh_conversation'
+    }
+    elseif ([string]$errorMessage -match '(?i)exited with status|exit(?:ed)? code|agy failed') {
+        $errorCode = 'worker_process_failed'; $terminationReason = 'worker_process_failed'; $recoveryHint = 'resume_or_start_fresh'
+    }
+}
+
 $awaitingKinds = @('auth_required', 'trust_required', 'awaiting_input')
 $lastSignalAt = Convert-ToDate (Get-PropertyValue $lastSignal 'observedAt')
 $lastEventAt = Convert-ToDate (Get-PropertyValue $lastEvent 'observedAt')

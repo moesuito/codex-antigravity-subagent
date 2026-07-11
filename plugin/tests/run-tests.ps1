@@ -164,6 +164,21 @@ try {
     Assert-Equal $emptyStatus.status 'failed' 'empty final response is never completed'
     Assert-Equal $emptyStatus.errorCode 'missing_final_response' 'empty legacy response has explicit error code'
 
+    $legacyErrorKey = [guid]::NewGuid().ToString()
+    $legacyErrorDirectory = Join-Path $stateRoot "sessions\$legacyErrorKey"
+    Write-Json (Join-Path $legacyErrorDirectory 'metadata.json') ([ordered]@{
+        schemaVersion = 1; sessionKey = $legacyErrorKey; workspace = $temporaryRoot
+        launcherPid = 999994; startedAt = $now.ToString('o'); updatedAt = $now.ToString('o')
+        endedAt = $now.ToString('o'); exitCode = 1; launcherState = 'failed'; finalResponse = ''
+    })
+    Write-JsonLines (Join-Path $legacyErrorDirectory 'events.jsonl') @(
+        [ordered]@{ eventType = 'PreInvocation'; observedAt = $now.AddSeconds(-1).ToString('o'); conversationId = $null },
+        [ordered]@{ eventType = 'Stop'; observedAt = $now.ToString('o'); conversationId = $null; fullyIdle = $true; terminationReason = 'error'; error = "unknown sessionId: $legacyErrorKey" }
+    )
+    $legacyErrorStatus = & $statusScript -SessionKey $legacyErrorKey -StateRoot $stateRoot -Now $now -NoWriteHealth | ConvertFrom-Json
+    Assert-Equal $legacyErrorStatus.errorCode 'session_not_resumable' 'legacy unknown session error is normalized'
+    Assert-Equal $legacyErrorStatus.recoveryHint 'start_fresh_conversation' 'legacy unknown session has recovery hint'
+
     # Recovery handoff includes evidence and is round-trippable.
     $handoff = & $handoffScript `
         -WorkspaceBase64 (Encode $temporaryRoot) `
