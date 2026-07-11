@@ -32,7 +32,7 @@ CODEX_AGY_REQUEST_READY=1
 Send a single compact JSON line to that same terminal session:
 
 ```json
-{"workspace":"C:\\absolute\\repo","task":"Concrete task and acceptance criteria","mode":"accept-edits","modelTier":"High"}
+{"workspace":"C:\\absolute\\repo","task":"Concrete task and acceptance criteria. Final report: outcome, files, validation, commit, risks.","mode":"accept-edits","modelTier":"High","outputMode":"silent"}
 ```
 
 To resume a session (multi-turn), also include `sessionKey`:
@@ -76,12 +76,14 @@ State precedence:
 
 The broker automatically appends events to `events.jsonl` matching the old observer schema, allowing `get-session-status.ps1` to parse status seamlessly.
 
-## 3. Monitoring loop
+## 3. Standby and watchdog
 
-1. Poll the running broker process by reading its output.
-2. Query the status helper `get-session-status.ps1` periodically.
-3. Give the user a concise update at least once per 60 seconds while work continues.
-4. If the broker finishes with code 0, read the metadata final response.
+1. Submit the request with `outputMode: "silent"`, then leave that same terminal waiting. Do not poll terminal output or invoke the status helper during normal execution.
+2. The broker stores worker chunks and tool events locally but does not relay them to Codex. This prevents progress chatter from consuming Codex context.
+3. On the final ACP response, the broker persists `finalResponse`, emits `Stop`, and writes one `CODEX_AGY_TURN_FINISHED` line. That line is the completion wake-up signal.
+4. The broker records a passive watchdog checkpoint at 5 minutes. It remains silent at that point.
+5. After 10 minutes, it checks once per minute. A `CODEX_AGY_WATCHDOG_REVIEW` line is emitted only if no ACP lifecycle activity occurred for the preceding escalation interval. On that event, query `get-session-status.ps1` once and inspect minimal evidence; resume standby unless recovery is justified.
+6. When `CODEX_AGY_TURN_FINISHED` arrives, query `get-session-status.ps1 -IncludeContent` exactly once, then review the diff and tests.
 
 The status helper marks:
 

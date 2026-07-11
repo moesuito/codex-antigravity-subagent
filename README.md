@@ -39,6 +39,8 @@ Start a new Codex task after installation so the updated plugin and skill are lo
 - Uses `Gemini 3.5 Flash (High)` by default with `accept-edits` mode.
 - Locks one live session per workspace, while allowing other workspaces in parallel.
 - Detects completion only from `Stop` plus `fullyIdle` events via sqlite db streaming.
+- Keeps Codex in silent standby: the worker's final response emits one completion wake-up instead of streaming progress into Codex context.
+- Runs a passive watchdog check at 5 minutes, then checks each minute after 10 minutes and wakes Codex only when ACP lifecycle activity is absent.
 - Keeps an idle worker session open while Codex reviews the diff, commit, and tests.
 - Sends review deltas directly to the same worker session; no user copy/paste bridge.
 - Recovers stalls with bounded retries and evidence-backed handoffs.

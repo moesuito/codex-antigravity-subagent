@@ -78,6 +78,27 @@ const prompt = request.task.trim();
 const mode = request.mode ?? "accept-edits";
 const modelTier = request.modelTier ?? "High";
 const sessionKey = request.sessionKey || crypto.randomUUID();
+const outputMode = request.outputMode ?? "silent";
+if (!new Set(["silent", "verbose"]).has(outputMode)) {
+  fail("outputMode must be silent or verbose");
+}
+
+const watchdogRequest = request.watchdog && typeof request.watchdog === "object" ? request.watchdog : {};
+function watchdogSeconds(name, fallback) {
+  const value = watchdogRequest[name] ?? fallback;
+  if (!Number.isInteger(value) || value < 1) {
+    fail(`watchdog.${name} must be a positive integer`);
+  }
+  return value;
+}
+const watchdog = {
+  passiveCheckSeconds: watchdogSeconds("passiveCheckSeconds", 300),
+  escalationAfterSeconds: watchdogSeconds("escalationAfterSeconds", 600),
+  escalationIntervalSeconds: watchdogSeconds("escalationIntervalSeconds", 60),
+};
+if (watchdog.escalationAfterSeconds < watchdog.passiveCheckSeconds) {
+  fail("watchdog.escalationAfterSeconds must be at least watchdog.passiveCheckSeconds");
+}
 
 let workspaceStats;
 try {
@@ -138,6 +159,11 @@ if (!process.env.CODEX_AGY_ACP_PATH && !fs.existsSync(acpBinaryPath)) {
 // Initial Metadata
 let conversationId = null;
 let toolCallStepCount = 1;
+let lastWorkerActivityAt = Date.now();
+let lastMetadataActivityAt = 0;
+let executionFinished = false;
+let watchdogTimer = null;
+let nextWatchdogAt = Date.now() + watchdog.passiveCheckSeconds * 1000;
 
 function updateMetadata(updates) {
   let metadata = {};
@@ -147,6 +173,7 @@ function updateMetadata(updates) {
       metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
     } catch (err) {}
   }
+  const updatedAt = updates.updatedAt ?? new Date().toISOString();
   metadata = {
     schemaVersion: 1,
     sessionKey,
@@ -159,13 +186,14 @@ function updateMetadata(updates) {
     mode,
     autonomy: "full-machine",
     startedAt: metadata.startedAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    updatedAt,
     endedAt: null,
     exitCode: null,
     launcherState: "running",
     logPath: path.join(sessionDir, "agy.log"),
     ...metadata,
     ...updates,
+    updatedAt,
   };
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 }
@@ -182,7 +210,74 @@ function appendEvent(eventType, extra = {}) {
   fs.appendFileSync(path.join(sessionDir, "events.jsonl"), JSON.stringify(event) + "\n", "utf8");
 }
 
+function emitSignal(kind, details = {}) {
+  process.stdout.write(`${kind}=${JSON.stringify({ sessionKey, ...details })}\n`);
+}
+
+function noteWorkerActivity() {
+  lastWorkerActivityAt = Date.now();
+  // Keep watchdog health current without writing once per streamed token.
+  if (lastWorkerActivityAt - lastMetadataActivityAt >= 15000) {
+    lastMetadataActivityAt = lastWorkerActivityAt;
+    updateMetadata({ workerLastActivityAt: new Date(lastWorkerActivityAt).toISOString() });
+  }
+}
+
+function writeWatchdogCheckpoint(kind) {
+  const now = Date.now();
+  const checkpoint = {
+    schemaVersion: 1,
+    kind,
+    observedAt: new Date(now).toISOString(),
+    elapsedSeconds: Math.floor((now - new Date(readMetadataStartedAt()).getTime()) / 1000),
+    inactiveSeconds: Math.floor((now - lastWorkerActivityAt) / 1000),
+  };
+  fs.writeFileSync(path.join(sessionDir, "watchdog.json"), JSON.stringify(checkpoint, null, 2), "utf8");
+  return checkpoint;
+}
+
+function readMetadataStartedAt() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(sessionDir, "metadata.json"), "utf8")).startedAt || new Date().toISOString();
+  } catch {
+    return new Date().toISOString();
+  }
+}
+
+function scheduleWatchdog() {
+  if (executionFinished) return;
+  const delay = Math.max(1, nextWatchdogAt - Date.now());
+  watchdogTimer = setTimeout(runWatchdog, delay);
+}
+
+function runWatchdog() {
+  if (executionFinished) return;
+  const now = Date.now();
+  const startedAt = new Date(readMetadataStartedAt()).getTime();
+  const elapsedSeconds = Math.floor((now - startedAt) / 1000);
+  if (elapsedSeconds >= watchdog.escalationAfterSeconds) {
+    const checkpoint = writeWatchdogCheckpoint("escalation_check");
+    if (now - lastWorkerActivityAt >= watchdog.escalationIntervalSeconds * 1000) {
+      emitSignal("CODEX_AGY_WATCHDOG_REVIEW", {
+        elapsedSeconds: checkpoint.elapsedSeconds,
+        inactiveSeconds: checkpoint.inactiveSeconds,
+      });
+    }
+    nextWatchdogAt = now + watchdog.escalationIntervalSeconds * 1000;
+  } else {
+    writeWatchdogCheckpoint("passive_check");
+    nextWatchdogAt = startedAt + watchdog.escalationAfterSeconds * 1000;
+  }
+  scheduleWatchdog();
+}
+
+function finishExecution() {
+  executionFinished = true;
+  if (watchdogTimer) clearTimeout(watchdogTimer);
+}
+
 updateMetadata({ startedAt: new Date().toISOString(), launcherState: "running" });
+scheduleWatchdog();
 
 // Output initial environment bindings for Codex log parser
 process.stdout.write(`CODEX_AGY_SESSION_KEY=${sessionKey}\n`);
@@ -195,6 +290,9 @@ const env = { ...process.env };
 env.AGY_EXTRA_ARGS = "--dangerously-skip-permissions";
 
 // Spawn agy-acp
+const pendingRequests = new Map();
+let nextRequestId = 1;
+
 const child = spawn(acpBinaryPath, [], {
   cwd: workspace,
   env,
@@ -214,6 +312,16 @@ child.on("error", (error) => {
   pendingRequests.clear();
 });
 
+child.on("close", (code, signal) => {
+  if (executionFinished) return;
+  const error = new Error(`agy-acp exited before completing the turn (code=${code ?? "null"}, signal=${signal ?? "none"})`);
+  childSpawnError = error;
+  for (const pending of pendingRequests.values()) {
+    pending.reject(error);
+  }
+  pendingRequests.clear();
+});
+
 const logStream = fs.createWriteStream(path.join(sessionDir, "agy.log"), { flags: "a" });
 child.stderr.pipe(logStream);
 
@@ -221,9 +329,6 @@ const rl = readline.createInterface({
   input: child.stdout,
   terminal: false,
 });
-
-const pendingRequests = new Map();
-let nextRequestId = 1;
 
 function sendRequest(method, params = {}) {
   if (childSpawnError) return Promise.reject(childSpawnError);
@@ -239,20 +344,21 @@ let fullResponseText = "";
 
 function handleUpdate(update) {
   if (!update) return;
+  noteWorkerActivity();
 
   if (update.sessionUpdate === "agent_message_chunk") {
     if (update.content && update.content.text) {
-      process.stdout.write(update.content.text);
       fullResponseText += update.content.text;
+      if (outputMode === "verbose") process.stdout.write(update.content.text);
     }
   } else if (update.sessionUpdate === "tool_call") {
     const title = update.title || "Tool Call";
-    console.log(`\n⚙️ [Tool Call] ${title}`);
+    if (outputMode === "verbose") console.log(`\n⚙️ [Tool Call] ${title}`);
     appendEvent("PostToolUse", { stepIdx: toolCallStepCount++ });
   } else if (update.sessionUpdate === "tool_call_update") {
     const title = update.title || "Tool Call";
     const status = update.status || "completed";
-    console.log(`✅ [Tool Completed] ${title} (${status})`);
+    if (outputMode === "verbose") console.log(`✅ [Tool Completed] ${title} (${status})`);
   }
 }
 
@@ -332,8 +438,12 @@ try {
     terminationReason: "model_stop",
   });
 
+  finishExecution();
+  emitSignal("CODEX_AGY_TURN_FINISHED", { status: "completed", conversationId });
+
   process.exit(0);
 } catch (err) {
+  finishExecution();
   console.error("\n❌ Error during execution:", err);
   
   updateMetadata({
@@ -348,6 +458,8 @@ try {
     terminationReason: "error",
     error: err.message || String(err),
   });
+
+  emitSignal("CODEX_AGY_TURN_FINISHED", { status: "failed" });
 
   process.exit(1);
 }

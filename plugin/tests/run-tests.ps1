@@ -166,7 +166,7 @@ try {
     New-Item -ItemType Directory -Path $workspace -Force | Out-Null
     
     $mockAcpBat = Join-Path $temporaryRoot 'mock-acp.bat'
-    $mockContent = '@echo off' + [Environment]::NewLine + 'node -e "const rl = require(''readline'').createInterface({input: process.stdin}); rl.on(''line'', l => { try { const msg = JSON.parse(l); let result = {}; if (msg.method === ''initialize'') { result = {protocolVersion:1}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/new'') { result = {sessionId:''test-session''}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/setConfigOption'') { result = {}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/prompt'') { console.log(JSON.stringify({jsonrpc:''2.0'',method:''session/update'',params:{update:{sessionUpdate:''agent_message_chunk'',content:{type:''text'',text:''PONG''}}}})); setTimeout(() => { console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}})); }, 2000); } } catch(e) {} });"'
+    $mockContent = '@echo off' + [Environment]::NewLine + 'node -e "const rl = require(''readline'').createInterface({input: process.stdin}); rl.on(''line'', l => { try { const msg = JSON.parse(l); let result = {}; if (msg.method === ''initialize'') { result = {protocolVersion:1}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/new'') { result = {sessionId:''test-session''}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/setConfigOption'') { result = {}; console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result})); } else if (msg.method === ''session/prompt'') { console.log(JSON.stringify({jsonrpc:''2.0'',method:''session/update'',params:{update:{sessionUpdate:''agent_message_chunk'',content:{type:''text'',text:''PONG''}}}})); setTimeout(() => { console.log(JSON.stringify({jsonrpc:''2.0'',id:msg.id,result:{stopReason:''end_turn''}})); }, 3000); } } catch(e) {} });"'
     Set-Content -LiteralPath $mockAcpBat -Value $mockContent
 
     $pInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -212,6 +212,8 @@ try {
         task = "lock test"
         mode = "plan"
         modelTier = "High"
+        outputMode = "silent"
+        watchdog = @{ passiveCheckSeconds = 1; escalationAfterSeconds = 1; escalationIntervalSeconds = 1 }
     } | ConvertTo-Json -Compress
 
     $proc.StandardInput.WriteLine($requestJson)
@@ -245,6 +247,13 @@ try {
 
     $proc.WaitForExit(10000) | Out-Null
     if (-not $proc.HasExited) { $proc.Kill() }
+    $brokerOutput = $proc.StandardOutput.ReadToEnd()
+    Assert-True ($brokerOutput -match 'CODEX_AGY_TURN_FINISHED') 'silent broker emits one completion signal'
+    Assert-True ($brokerOutput -match 'CODEX_AGY_WATCHDOG_REVIEW') 'watchdog escalates after configured threshold'
+    Assert-True (-not $brokerOutput.Contains('PONG')) 'silent broker hides streamed worker output'
+    $launchedSession = [regex]::Match($brokerOutput, 'CODEX_AGY_SESSION_KEY=([0-9a-f-]{36})').Groups[1].Value
+    $brokerMetadata = Get-Content -Raw (Join-Path $lockState "sessions\$launchedSession\metadata.json") | ConvertFrom-Json
+    Assert-True (-not [string]::IsNullOrWhiteSpace($brokerMetadata.workerLastActivityAt)) 'worker activity is persisted for watchdog health'
     
     Start-Sleep -Milliseconds 200
     $remainingLocks = @(Get-ChildItem -LiteralPath (Join-Path $lockState 'locks') -Filter '*.lock' -File -ErrorAction SilentlyContinue)

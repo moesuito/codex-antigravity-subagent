@@ -15,16 +15,16 @@ Before operating a session, read [references/session-protocol.md](references/ses
 
 1. Determine the concrete coding task and one absolute workspace path. Use the active repository when unambiguous; do not guess between multiple roots.
 2. Resolve the plugin root as two directories above this `SKILL.md`. Never hard-code the development source path because installed plugins run from a cache.
-3. Start `scripts/start-agy-session.mjs` with the terminal execution tool and the workspace as `workdir`. Wait for `CODEX_AGY_REQUEST_READY=1`, then send one JSON request with the terminal input tool. Do not interpolate the task into a shell command.
-4. Capture `CODEX_AGY_SESSION_KEY` from stdout, and monitor execution. Never start a second session for the same workspace while the first lock is held.
-5. Query `scripts/get-session-status.ps1` after material output and during monitoring. Report useful progress at least once per minute during long work.
-6. Declare a turn complete only when status is `completed`, and the final response follows the latest Codex instruction.
-7. Review the actual diff, files, and tests. Do not hand back an unverified Antigravity claim.
-8. To send a follow-up correction or multi-turn instruction, start a new invocation of `scripts/start-agy-session.mjs` with the same `sessionKey` (this resumes the warm conversation state seamlessly using the ACP adapter). Exit only when Codex accepts the task, abandons it, or recovery requires a new session.
+3. Start `scripts/start-agy-session.mjs` with the terminal execution tool and the workspace as `workdir`. Wait for `CODEX_AGY_REQUEST_READY=1`, then send one JSON request with `outputMode: "silent"`. Do not interpolate the task into a shell command.
+4. Capture `CODEX_AGY_SESSION_KEY` from stdout, then enter standby on that same terminal. Never start a second session for the same workspace while the first lock is held.
+5. Do not poll the PTY or `get-session-status.ps1` while the worker is silent. The broker wakes Codex with `CODEX_AGY_TURN_FINISHED` as soon as Antigravity returns its final response. It performs a passive health check at 5 minutes and emits a compact watchdog review only after 10 minutes of work with no lifecycle activity, at most once per minute thereafter.
+6. On `CODEX_AGY_TURN_FINISHED`, query `scripts/get-session-status.ps1 -IncludeContent` once. On `CODEX_AGY_WATCHDOG_REVIEW`, query it once, inspect the minimal relevant evidence, then resume standby unless recovery is warranted.
+7. Declare a turn complete only when status is `completed`, and the final response follows the latest Codex instruction. Every delegated task must request a concise final report covering outcome, changed files, validation, commit, and remaining risks; do not ask the worker for running narration.
+8. Review the actual diff, files, and tests. Do not hand back an unverified Antigravity claim. To send a follow-up correction or multi-turn instruction, start a new invocation of `scripts/start-agy-session.mjs` with the same `sessionKey` (this resumes the warm conversation state seamlessly using the ACP adapter). Exit only when Codex accepts the task, abandons it, or recovery requires a new session.
 
 ## Multi-turn review loop
 
-After each turn reaches `completed`, Codex must inspect the relevant files, diff, and validation results. If review finds a concrete code delta, start a new `start-agy-session.mjs` invocation passing the same `sessionKey` to submit only that delta. When the task is accepted and there is no further coding work, the session is complete.
+After each terminal completion signal, Codex must inspect the relevant files, diff, and validation results exactly once. If review finds a concrete code delta, start a new `start-agy-session.mjs` invocation passing the same `sessionKey` to submit only that delta. When the task is accepted and there is no further coding work, the session is complete.
 
 ## Model policy
 
