@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '2.1.2',
-    [string]$OutputDirectory
+    [string]$Version = '2.2.0',
+    [string]$OutputDirectory,
+    [string]$AcpBinaryPath
 )
 
 Set-StrictMode -Version Latest
@@ -23,9 +24,24 @@ $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "codex-antigravity-subagent-release-$([guid]::NewGuid().ToString('N'))"
 $archivePath = Join-Path $OutputDirectory 'codex-antigravity-subagent.zip'
 try {
-    # Compile agy-acp adapter
-    $acpCargoPath = Join-Path $repositoryRoot 'plugin\agy-acp\Cargo.toml'
-    if (Test-Path -LiteralPath $acpCargoPath -PathType Leaf) {
+    $binDir = Join-Path $repositoryRoot 'plugin\bin'
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    $pluginAcpBinary = Join-Path $binDir 'agy-acp.exe'
+
+    if ($AcpBinaryPath) {
+        $AcpBinaryPath = [System.IO.Path]::GetFullPath($AcpBinaryPath)
+        if (-not (Test-Path -LiteralPath $AcpBinaryPath -PathType Leaf)) {
+            throw "Precompiled agy-acp binary not found: $AcpBinaryPath"
+        }
+        Write-Host "Using precompiled agy-acp: $AcpBinaryPath"
+        Copy-Item -LiteralPath $AcpBinaryPath -Destination $pluginAcpBinary -Force
+    }
+    else {
+        # Compile agy-acp from the bundled source by default.
+        $acpCargoPath = Join-Path $repositoryRoot 'plugin\agy-acp\Cargo.toml'
+        if (-not (Test-Path -LiteralPath $acpCargoPath -PathType Leaf)) {
+            throw 'Missing plugin/agy-acp/Cargo.toml and no -AcpBinaryPath was supplied.'
+        }
         Write-Host "Compiling agy-acp..."
         & cargo build --release --manifest-path $acpCargoPath
         if ($LASTEXITCODE -ne 0) {
@@ -38,9 +54,7 @@ try {
         if (-not (Test-Path -LiteralPath $acpBinarySource -PathType Leaf)) {
             throw "Compiled agy-acp binary not found."
         }
-        $binDir = Join-Path $repositoryRoot 'plugin\bin'
-        New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-        Copy-Item -LiteralPath $acpBinarySource -Destination (Join-Path $binDir 'agy-acp.exe') -Force
+        Copy-Item -LiteralPath $acpBinarySource -Destination $pluginAcpBinary -Force
     }
 
     New-Item -ItemType Directory -Path $OutputDirectory, $stagingDirectory -Force | Out-Null

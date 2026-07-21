@@ -15,7 +15,7 @@ Before operating a session, read [references/session-protocol.md](references/ses
 
 1. Determine the concrete coding task and one absolute workspace path. Use the active repository when unambiguous; do not guess between multiple roots.
 2. Resolve the plugin root as two directories above this `SKILL.md`. Never hard-code the development source path because installed plugins run from a cache.
-3. Start `scripts/start-agy-session.mjs` with the terminal execution tool and the workspace as `workdir`. Wait for `CODEX_AGY_REQUEST_READY=1`, then send one JSON request with `outputMode: "silent"`. Do not interpolate the task into a shell command.
+3. Start `scripts/start-agy-session.mjs` with the terminal execution tool and the workspace as `workdir`. Wait for `CODEX_AGY_REQUEST_READY=1`, then send one JSON request with `model: "gemini-3.5-flash"`, a separate `effort`, and `outputMode: "silent"`. Do not interpolate the task into a shell command.
 4. Capture `CODEX_AGY_SESSION_KEY` from stdout, then enter standby on that same terminal. Never start a second session for the same workspace while the first lock is held.
 5. Do not poll the PTY or `get-session-status.ps1` while the worker is silent. The broker wakes Codex with `CODEX_AGY_TURN_FINISHED` as soon as Antigravity returns its final response. It performs a passive health check at 5 minutes and emits a compact watchdog review only after 10 minutes of work with no lifecycle activity, at most once per minute thereafter.
 6. On `CODEX_AGY_TURN_FINISHED`, query `scripts/get-session-status.ps1 -IncludeContent` once. On `CODEX_AGY_WATCHDOG_REVIEW`, query it once, inspect the minimal relevant evidence, then resume standby unless recovery is warranted.
@@ -28,9 +28,10 @@ After each terminal completion signal, Codex must inspect the relevant files, di
 
 ## Model policy
 
-- Default to `Gemini 3.5 Flash (High)`.
-- Use Medium or Low only for an unmistakably trivial initial task.
-- Use High for every recovery conversation.
+- Default to model `gemini-3.5-flash` with effort `high`.
+- Pass the base model slug through `model` and the reasoning level through the separate `effort` field. Never append effort to the model value or use the legacy friendly form such as `Gemini 3.5 Flash (High)`.
+- Use effort `medium` or `low` only for an unmistakably trivial initial task.
+- Use effort `high` for every recovery conversation.
 - Do not switch automatically to Gemini 3.1 Pro, Claude, or another model family.
 
 ## Recovery policy

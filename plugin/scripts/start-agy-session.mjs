@@ -76,7 +76,18 @@ if (typeof request.task !== "string" || !request.task.trim()) {
 const workspace = path.resolve(request.workspace);
 const prompt = request.task.trim();
 const mode = request.mode ?? "accept-edits";
-const modelTier = request.modelTier ?? "High";
+if (request.model !== undefined && (typeof request.model !== "string" || !request.model.trim())) {
+  fail("model must be a non-empty agy model slug");
+}
+const model = request.model?.trim() || "gemini-3.5-flash";
+const legacyEffort = typeof request.modelTier === "string" ? request.modelTier.trim().toLowerCase() : null;
+if (request.effort !== undefined && (typeof request.effort !== "string" || !request.effort.trim())) {
+  fail("effort must be low, medium, or high");
+}
+const effort = request.effort?.trim().toLowerCase() || legacyEffort || "high";
+if (!new Set(["low", "medium", "high"]).has(effort)) {
+  fail("effort must be low, medium, or high");
+}
 const sessionKey = request.sessionKey || crypto.randomUUID();
 const outputMode = request.outputMode ?? "silent";
 if (!new Set(["silent", "verbose"]).has(outputMode)) {
@@ -207,7 +218,8 @@ function updateMetadata(updates) {
     workspaceHash,
     launcherPid: process.pid,
     agyPath: "agy-acp",
-    model: `Gemini 3.5 Flash (${modelTier})`,
+    model,
+    effort,
     mode,
     autonomy: "full-machine",
     startedAt: metadata.startedAt || new Date().toISOString(),
@@ -492,12 +504,16 @@ try {
     updateMetadata({ acpSessionId: sessionId });
   }
 
-  // 3. Set Config model
-  const mappedModel = `Gemini 3.5 Flash (${modelTier})`;
+  // 3. Set the agy 1.1.5+ model slug and reasoning effort independently.
   await sendRequest("session/setConfigOption", {
     sessionId,
     configId: "model",
-    value: mappedModel,
+    value: model,
+  });
+  await sendRequest("session/setConfigOption", {
+    sessionId,
+    configId: "effort",
+    value: effort,
   });
 
   // 4. session/prompt

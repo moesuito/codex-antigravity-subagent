@@ -394,6 +394,7 @@ $evidence.Add("inactiveSeconds:$inactiveSeconds")
     conversationId     = $conversationId
     workspace          = Get-PropertyValue $metadata 'workspace'
     model              = Get-PropertyValue $metadata 'model'
+    effort             = Get-PropertyValue $metadata 'effort'
     mode               = Get-PropertyValue $metadata 'mode'
     autonomy           = Get-PropertyValue $metadata 'autonomy'
     status             = $status

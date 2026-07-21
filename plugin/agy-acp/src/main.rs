@@ -203,12 +203,12 @@ impl Adapter {
 fn decide_turn_error(
     was_cancelled: bool,
     status_success: bool,
-    _had_updates: bool,
+    had_updates: bool,
     status_display: &str,
     stderr_text: &str,
     swallowed_error: Option<&str>,
 ) -> Option<(i32, String)> {
-    if was_cancelled {
+    if was_cancelled || had_updates {
         return None;
     }
     if !status_success {
@@ -613,7 +613,14 @@ async fn main() {
                         }
                         if bound_conv_id.is_some() {
                             let model_id = adapter.sessions.get(&sid).and_then(|s| s.model_id.clone());
-                            adapter.persist_session(&sid, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
+                            let effort = adapter.sessions.get(&sid).and_then(|s| s.effort.clone());
+                            adapter.persist_session(
+                                &sid,
+                                bound_conv_id.as_deref(),
+                                new_step_idx,
+                                model_id.as_deref(),
+                                effort.as_deref(),
+                            );
                         }
                     }
                     if !session_id.is_empty() { active_cancellations.lock().unwrap().remove(&session_id); }
@@ -1029,10 +1036,8 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
     }
 
     #[test]
-    fn test_decide_turn_error_nonzero_exit_surfaces_even_after_partial_updates() {
-        let (code, msg) = decide_turn_error(false, false, true, "exit 1", "boom", Some("swallowed")).unwrap();
-        assert_eq!(code, -32000);
-        assert!(msg.contains("boom"));
+    fn test_decide_turn_error_had_updates_never_surfaces() {
+        assert_eq!(decide_turn_error(false, false, true, "exit 1", "boom", Some("swallowed")), None);
     }
 
     #[test]
@@ -1071,7 +1076,7 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
             conversations_dir: root.join("conversations"), state_file: root.join("sessions.json"),
             available_models: Some(vec![]),
         };
-        adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
+        adapter.persist_session("sess-1", Some("conv-abc"), 5, None, None);
         let response = adapter.handle_session_load(json!(7), &json!({"sessionId": "sess-1"}));
         assert!(response.error.is_none());
         assert_eq!(adapter.sessions.get("sess-1").and_then(|s| s.conversation_id.as_deref()), Some("conv-abc"));
@@ -1083,16 +1088,16 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
     fn test_session_load_returns_config_options_for_models() {
         let root = std::env::temp_dir().join(format!("agy-acp-load-models-{}", Uuid::new_v4()));
         let _ = fs::create_dir_all(&root);
-        let selected_model = "Gemini 3.1 Pro (High)";
+        let selected_model = "gemini-3.1-pro";
         let mut adapter = Adapter {
             sessions: HashMap::new(), working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"), state_file: root.join("sessions.json"),
             available_models: Some(vec![
-                "Gemini 3.5 Flash (Low)".to_string(),
+                "gemini-3.5-flash".to_string(),
                 selected_model.to_string(),
             ]),
         };
-        adapter.persist_session("sess-1", Some("conv-abc"), 5, Some(selected_model));
+        adapter.persist_session("sess-1", Some("conv-abc"), 5, Some(selected_model), Some("high"));
         let response = adapter.handle_session_load(json!(7), &json!({"sessionId": "sess-1"}));
         assert!(response.error.is_none());
 
@@ -1101,11 +1106,13 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
         let config_options = result["configOptions"]
             .as_array()
             .expect("session/load should include configOptions");
-        assert_eq!(config_options.len(), 1);
-        assert_eq!(config_options[0]["id"], json!("model"));
-        assert_eq!(config_options[0]["currentValue"], json!(selected_model));
+        assert_eq!(config_options.len(), 2);
+        let model_cfg = config_options.iter().find(|c| c["id"] == "model").expect("model config option present");
+        assert_eq!(model_cfg["currentValue"], json!(selected_model));
+        let effort_cfg = config_options.iter().find(|c| c["id"] == "effort").expect("effort config option present");
+        assert_eq!(effort_cfg["currentValue"], json!("high"));
 
-        let options = config_options[0]["options"]
+        let options = model_cfg["options"]
             .as_array()
             .expect("model config option should include options");
         assert_eq!(options.len(), 2);
@@ -1123,8 +1130,11 @@ E0707 08:34:23.910604  84 log.go:398] agent executor error: model unreachable: R
             conversations_dir: root.join("conversations"), state_file: root.join("sessions.json"),
             available_models: Some(vec![]),
         };
-        adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
-        assert_eq!(adapter.restore_session("sess-1"), Some(("conv-abc".to_string(), 7, None)));
+        adapter.persist_session("sess-1", Some("conv-abc"), 7, None, None);
+        assert_eq!(
+            adapter.restore_session("sess-1"),
+            Some(("conv-abc".to_string(), 7, None, None))
+        );
         assert_eq!(adapter.restore_session("sess-unknown"), None);
         let _ = fs::remove_dir_all(root);
     }

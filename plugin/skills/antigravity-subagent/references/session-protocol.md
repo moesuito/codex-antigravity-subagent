@@ -32,14 +32,16 @@ CODEX_AGY_REQUEST_READY=1
 Send a single compact JSON line to that same terminal session:
 
 ```json
-{"workspace":"C:\\absolute\\repo","task":"Concrete task and acceptance criteria. Final report: outcome, files, validation, commit, risks.","mode":"accept-edits","modelTier":"High","outputMode":"silent"}
+{"workspace":"C:\\absolute\\repo","task":"Concrete task and acceptance criteria. Final report: outcome, files, validation, commit, risks.","mode":"accept-edits","model":"gemini-3.5-flash","effort":"high","outputMode":"silent"}
 ```
 
 To resume a session (multi-turn), also include `sessionKey`:
 
 ```json
-{"workspace":"C:\\absolute\\repo","task":"Correction or follow-up prompt","mode":"accept-edits","modelTier":"High","sessionKey":"<prior-session-key>"}
+{"workspace":"C:\\absolute\\repo","task":"Correction or follow-up prompt","mode":"accept-edits","model":"gemini-3.5-flash","effort":"high","sessionKey":"<prior-session-key>","outputMode":"silent"}
 ```
+
+`model` is an agy 1.1.5+ base slug. `effort` is independently validated as `low`, `medium`, or `high` and becomes the CLI's `--effort` argument. The broker accepts the old `modelTier` field only as a migration fallback for existing callers; new requests must use `effort`.
 
 The broker launches `agy-acp.exe` and handles the JSON-RPC handshake over stdin/stdout. Capture:
 
@@ -65,7 +67,7 @@ The JSON contract contains:
 - `status`: `starting`, `running`, `completed`, `recovering`, or `failed`
 - `phase`: `thinking`, `background`, `idle`, or `unknown`
 - `health`: `ok`, `suspected_stall`, or `stalled`
-- workspace, model, mode, session key, conversation ID
+- workspace, model, effort, mode, session key, conversation ID
 - process liveness, `fullyIdle`, error, and evidence
 - `brokerExitCode`, `workerExitCode`, `hasFinalResponse`, `errorCode`, and `recoveryHint`
 

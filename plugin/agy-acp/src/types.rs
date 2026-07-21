@@ -41,12 +41,15 @@ pub struct StoredSession {
     pub last_step_idx: i64,
     #[serde(default)]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 pub struct Session {
     pub conversation_id: Option<String>,
     pub last_step_idx: i64,
     pub model_id: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Tracks streaming poll state shared between the polling thread and main task.

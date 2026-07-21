@@ -7,7 +7,7 @@ Use Google Antigravity CLI (`agy`) as a monitored coding subagent from Codex. Co
 Prerequisites:
 
 - Codex CLI/Desktop installed and signed in.
-- Antigravity CLI (`agy`) installed and signed in.
+- Antigravity CLI (`agy`) 1.1.5+ installed and signed in.
 - Windows PowerShell 7+.
 
 Run this from PowerShell on the target machine:
@@ -36,7 +36,8 @@ Start a new Codex task after installation so the updated plugin and skill are lo
 ## What it does
 
 - Launches a headless ACP server using the compiled `agy-acp` adapter binary.
-- Uses `Gemini 3.5 Flash (High)` by default with `accept-edits` mode.
+- Uses model `gemini-3.5-flash` with separate effort `high` by default and `accept-edits` mode.
+- Passes `--model <slug>` and `--effort <low|medium|high>` independently, matching the agy 1.1.5+ CLI contract while migrating legacy persisted model names on resume.
 - Locks one live session per workspace, while allowing other workspaces in parallel.
 - Detects completion only from `Stop` plus `fullyIdle` events via sqlite db streaming.
 - Keeps Codex in silent standby: the worker's final response emits one completion wake-up instead of streaming progress into Codex context.

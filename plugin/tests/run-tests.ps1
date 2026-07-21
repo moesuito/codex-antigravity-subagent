@@ -228,7 +228,8 @@ try {
         $process = [System.Diagnostics.Process]::Start($info)
         $readyLine = $process.StandardOutput.ReadLine()
         $request = [ordered]@{
-            workspace = $workspace; task = $Task; mode = 'plan'; modelTier = 'High'; outputMode = 'silent'
+            workspace = $workspace; task = $Task; mode = 'plan'
+            model = 'gemini-3.5-flash'; effort = 'high'; outputMode = 'silent'
         }
         if ($ExistingSessionKey) { $request.sessionKey = $ExistingSessionKey }
         if ($FastWatchdog) {
@@ -272,7 +273,8 @@ try {
         workspace = (Join-Path $temporaryRoot 'missing-workspace')
         task = 'invalid workspace test'
         mode = 'plan'
-        modelTier = 'High'
+        model = 'gemini-3.5-flash'
+        effort = 'high'
     } | ConvertTo-Json -Compress
     $invalidInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $invalidInfo.FileName = 'node'
@@ -294,7 +296,8 @@ try {
         workspace = $workspace
         task = "lock test"
         mode = "plan"
-        modelTier = "High"
+        model = "gemini-3.5-flash"
+        effort = "high"
         outputMode = "silent"
         watchdog = @{ passiveCheckSeconds = 1; escalationAfterSeconds = 1; escalationIntervalSeconds = 1 }
     } | ConvertTo-Json -Compress
@@ -336,6 +339,8 @@ try {
     Assert-True (-not $brokerOutput.Contains('PONG')) 'silent broker hides streamed worker output'
     $launchedSession = [regex]::Match($brokerOutput, 'CODEX_AGY_SESSION_KEY=([0-9a-f-]{36})').Groups[1].Value
     $brokerMetadata = Get-Content -Raw (Join-Path $lockState "sessions\$launchedSession\metadata.json") | ConvertFrom-Json
+    Assert-Equal $brokerMetadata.model 'gemini-3.5-flash' 'broker stores the agy model slug separately'
+    Assert-Equal $brokerMetadata.effort 'high' 'broker stores reasoning effort separately'
     Assert-True (-not [string]::IsNullOrWhiteSpace($brokerMetadata.workerLastActivityAt)) 'worker activity is persisted for watchdog health'
     
     Start-Sleep -Milliseconds 200

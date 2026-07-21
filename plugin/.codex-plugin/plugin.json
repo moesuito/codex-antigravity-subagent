@@ -1,6 +1,6 @@
 {
   "name": "antigravity-subagent",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Delegate coding work to a monitored Antigravity CLI session.",
   "author": {
     "name": "Alano"
@@ -17,7 +17,7 @@
   "interface": {
     "displayName": "Antigravity Subagent",
     "shortDescription": "Delegate coding to a monitored agy session",
-    "longDescription": "Runs Antigravity through a headless ACP adapter with silent standby, completion wake-ups, and bounded watchdog reviews.",
+    "longDescription": "Runs Antigravity through a headless ACP adapter with separate model and effort controls, silent standby, completion wake-ups, and bounded watchdog reviews.",
     "developerName": "Alano",
     "category": "Productivity",
     "capabilities": [

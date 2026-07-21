@@ -8,11 +8,11 @@ ACP (Agent Client Protocol) adapter for [Antigravity CLI](https://github.com/goo
 ## How it works
 
 ```
-openab ──JSON-RPC──► agy-acp ──spawns──► agy -p "prompt"
+openab ──JSON-RPC──► agy-acp ──spawns──► agy -p "prompt" [--conversation <uuid>] [--model <slug>] [--effort <low|medium|high>]
                         │
                         ├─ Tracks conversation IDs via SQLite .db files
                         ├─ Extracts responses from protobuf step_payload (field 20.1)
-                        └─ Persists session state for multi-turn conversations
+                        └─ Persists session state (conversation_id, model, effort) for multi-turn conversations
 ```
 
 ## Build
@@ -40,23 +40,29 @@ The E2E test spawns `agy-acp` → `agy` and verifies a full round-trip prompt/re
 
 | Requirement | Local dev | CI |
 |---|---|---|
-| `agy` binary | `~/.local/bin/agy` | Downloaded from GitHub release |
-| Auth | macOS Keychain (existing login) | `GEMINI_API_KEY` env var |
+| `agy` binary | `agy` on PATH (1.1.5+ validated) | Downloaded from GitHub release |
+| Auth | System keychain (existing login) or `GEMINI_API_KEY` env var | `GEMINI_API_KEY` env var |
 
 **Local setup:**
 ```bash
-# Install agy v1.0.4+
-gh release download 1.0.4 --repo google-antigravity/antigravity-cli \
-  --pattern "agy_cli_mac_arm64.tar.gz" --dir /tmp
-tar -xzf /tmp/agy_cli_mac_arm64.tar.gz -C ~/.local/bin/
-ln -sf ~/.local/bin/antigravity ~/.local/bin/agy
+# Install agy 1.1.5+ (use the latest release for your platform)
+gh release download 1.1.5 --repo google-antigravity/antigravity-cli \
+  --pattern "agy_cli_*" --dir /tmp
+# Extract the archive for your platform and put the `antigravity` (or `agy.exe`)
+# binary on your PATH. On macOS/Linux:
+ln -sf /tmp/antigravity ~/.local/bin/agy
 
 # Run e2e
 export PATH="$HOME/.local/bin:$PATH"
 cargo test e2e -- --ignored --nocapture
 ```
 
+> [!NOTE]
+> `agy-acp` validates against `agy 1.1.5`. The adapter auto-migrates any session persisted under pre-1.1.5 model names (e.g. `Gemini 3.5 Flash (High)`) to 1.1.5 slugs + effort on `session/load`, so existing sessions keep working after upgrade.
+
 **CI:** The GitHub Actions workflow (`.github/workflows/e2e-agy-acp.yml`) handles everything automatically. It uses the `GEMINI_API_KEY` repo secret.
+
+**Windows local:** `cargo test --release -- --include-ignored test_e2e_agy_acp_full_round_trip` runs against an installed `agy.exe` on PATH (validated on Windows against `agy 1.1.5`).
 
 ### Updating the API key
 
